@@ -1,0 +1,16 @@
+[project]
+name = "life-coach-agent-final"
+version = "0.1.0"
+description = "A Streamlit life coach agent with web search, file search, and image generation."
+requires-python = ">=3.13"
+dependencies = [
+    "openai==2.31.0",
+    "openai-agents==0.13.6",
+    "python-dotenv>=1.1.1",
+    "streamlit>=1.48.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+]
