@@ -4,7 +4,6 @@ dotenv.load_dotenv()
 from openai import OpenAI
 import asyncio
 import base64
-import os
 import streamlit as st
 from agents import (
     Agent,
@@ -12,32 +11,12 @@ from agents import (
     SQLiteSession,
     WebSearchTool,
     FileSearchTool,
-    function_tool,
+    ImageGenerationTool,
 )
 
 client = OpenAI()
 
 VECTOR_STORE_ID = "vs_69df877005d88191a0019a074b8f56a6"
-
-IMAGE_PATH = "generated_image.png"
-
-
-@function_tool
-def generate_image(prompt: str) -> str:
-    """Generate an image using DALL-E 3. Use this to create vision boards, motivational posters, and celebratory images. Write the prompt in English."""
-    response = client.images.generate(
-        model="dall-e-3",
-        prompt=prompt,
-        n=1,
-        size="1024x1024",
-        response_format="b64_json",
-    )
-    b64 = response.data[0].b64_json
-    image_bytes = base64.b64decode(b64)
-    with open(IMAGE_PATH, "wb") as f:
-        f.write(image_bytes)
-    return f"Image generated successfully with prompt: {prompt}"
-
 
 if "agent" not in st.session_state:
     st.session_state["agent"] = Agent(
@@ -60,7 +39,7 @@ if "agent" not in st.session_state:
         웹에서 찾은 최신 팁이나 방법을 결합해서 코칭 조언을 주세요.
 
         사용 가능한 도구:
-            - Web Search Tool: 유저가 습관, 동기부여, 자기 개발, 생활 개선에 관한 질문을 하면 사용하세요. 답변하기 전에 항상 최신 팁과 검증된 방법을 먼저 검색하세요.
+            - Web Search Tool: 유저가 습관, 동기부여, 자기 개발, 생활 개선에 관한 질문을 하면 사용하세요.
             - File Search Tool: 유저가 자신의 목표, 일기, 기록, 진행 상황에 대해 질문하거나 업로드한 파일에 대해 질문할 때 사용하세요.
             - Image Generation Tool: 유저가 비전 보드, 동기부여 포스터, 축하 이미지, 진행 상황의 시각적 표현을 원할 때 사용하세요.
 
@@ -82,7 +61,7 @@ if "agent" not in st.session_state:
                 vector_store_ids=[VECTOR_STORE_ID],
                 max_num_results=3,
             ),
-            generate_image,
+            ImageGenerationTool(),
         ],
     )
 agent = st.session_state["agent"]
@@ -128,7 +107,17 @@ async def paint_history():
                     st.write(message["content"])
                 else:
                     if message["type"] == "message":
-                        st.write(message["content"][0]["text"].replace("$", "\\$"))
+                        for content in message.get("content", []):
+                            if isinstance(content, dict):
+                                if content.get("type") == "output_text":
+                                    st.write(content["text"].replace("$", "\\$"))
+                                elif content.get("type") == "output_image":
+                                    image_bytes = base64.b64decode(
+                                        content["image_base64"]
+                                    )
+                                    st.image(image_bytes)
+                            elif isinstance(content, str):
+                                st.write(content)
         if "type" in message:
             message_type = message["type"]
             if message_type == "web_search_call":
@@ -138,12 +127,15 @@ async def paint_history():
             elif message_type == "file_search_call":
                 with st.chat_message("ai"):
                     st.write("Searched your files...")
+            elif message_type == "image_generation_call":
+                with st.chat_message("ai"):
+                    st.write("Generated an image...")
 
 
 asyncio.run(paint_history())
 
 
-def update_status(status_container, event_type, event_data=None):
+def update_status(status_container, event_type):
     status_messages = {
         "response.web_search_call.completed": ("Web search completed.", "complete"),
         "response.web_search_call.in_progress": (
@@ -166,16 +158,24 @@ def update_status(status_container, event_type, event_data=None):
             "File search in progress...",
             "running",
         ),
+        "response.image_generation_call.in_progress": (
+            "Creating image...",
+            "running",
+        ),
+        "response.image_generation_call.generating": (
+            "Generating image...",
+            "running",
+        ),
+        "response.image_generation_call.completed": (
+            "Image created!",
+            "complete",
+        ),
         "response.completed": (" ", "complete"),
     }
 
     if event_type in status_messages:
         label, state = status_messages[event_type]
         status_container.update(label=label, state=state)
-
-    if event_type == "response.output_item.added":
-        if hasattr(event_data, "item") and getattr(event_data.item, "type", "") == "function_call":
-            status_container.update(label="Generating image... (this may take a moment)", state="running")
 
 
 async def run_agent(message):
@@ -185,9 +185,6 @@ async def run_agent(message):
         text_placeholder = st.empty()
         response = ""
 
-        st.session_state["image_placeholder"] = image_placeholder
-        st.session_state["text_placeholder"] = text_placeholder
-
         agent_message = build_agent_message(message)
 
         stream = Runner.run_streamed(
@@ -196,20 +193,18 @@ async def run_agent(message):
             session=session,
         )
 
-        image_displayed = False
-
         async for event in stream.stream_events():
-            if not image_displayed and os.path.exists(IMAGE_PATH):
-                image_placeholder.image(IMAGE_PATH)
-                os.remove(IMAGE_PATH)
-                image_displayed = True
-
             if event.type == "raw_response_event":
-                update_status(status_container, event.data.type, event.data)
+                update_status(status_container, event.data.type)
 
                 if event.data.type == "response.output_text.delta":
                     response += event.data.delta
                     text_placeholder.write(response.replace("$", "\\$"))
+
+                elif event.data.type == "response.image_gen_call.completed":
+                    if hasattr(event.data, "result") and event.data.result:
+                        image_bytes = base64.b64decode(event.data.result)
+                        image_placeholder.image(image_bytes)
 
             elif event.type == "run_item_stream_event":
                 if event.item.type == "tool_call_item":
@@ -231,11 +226,6 @@ prompt = st.chat_input(
 )
 
 if prompt:
-    if "image_placeholder" in st.session_state:
-        st.session_state["image_placeholder"].empty()
-    if "text_placeholder" in st.session_state:
-        st.session_state["text_placeholder"].empty()
-
     for file in prompt.files:
         if file.type.startswith("text/") or file.type == "application/pdf":
             with st.chat_message("ai"):
@@ -261,4 +251,4 @@ with st.sidebar:
     reset = st.button("Reset memory")
     if reset:
         asyncio.run(session.clear_session())
-    st.write(asyncio.run(session.get_items()))
+        st.rerun()
